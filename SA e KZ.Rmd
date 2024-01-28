@@ -30,7 +30,7 @@ library(openxlsx)
 
 
 ```{r}
-data <- read_excel("C:/Users/phabi/Desktop/MESTRADO/FGV/Trabalho Final/Dados/Fingercrossed.xlsx")
+data <- read_excel("yourpath")
 #data$id <- seq_along(data$Identifier)  
 ```
 
