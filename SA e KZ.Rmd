@@ -1,0 +1,383 @@
+Biblioteca
+
+```{r}
+# Install required packages
+install.packages("haven")
+install.packages("dplyr")
+install.packages("xts")
+install.packages("zoo")
+install.packages("DescTools")
+install.packages("plm")
+install.packages("reshape")
+install.packages("tidyr")
+install.packages("officer")
+install.packages("flextable")
+```
+
+```{r Libraries}
+library(dplyr)
+library(xts)
+library(zoo)
+library(DescTools)
+library(plm)
+library(reshape)
+library(tidyr)
+library(officer)
+library(flextable)
+library(readxl)
+library(openxlsx)
+```
+
+
+```{r}
+data <- read_excel("C:/Users/phabi/Desktop/MESTRADO/FGV/Trabalho Final/Dados/Fingercrossed.xlsx")
+#data$id <- seq_along(data$Identifier)  
+```
+
+Long Format
+
+```{r}
+data_long <- pivot_longer(data, 
+                          cols = -Identifier,  # Selecting all columns except the company name
+                          names_to = c(".value", "year"),  # Splitting the column names
+                          names_sep = "_")  # Separator used in the column names
+data_long <- data_long %>%
+  mutate(year = as.numeric(year))
+
+data_long <- data_long %>%
+  arrange(Identifier, year)
+
+```
+Criando Age
+
+```{r}
+data_long <- data_long %>%
+  group_by(Identifier) %>%  # Group by firm identifier
+  arrange(Identifier, year) %>%  # Sort by firm and year
+  mutate(PriceClose_NotNA = !is.na(PriceClose),  # Identify non-NA PriceClose years
+         Age = if_else(PriceClose_NotNA, cumsum(PriceClose_NotNA), 0)) %>%  # Cumulative sum reset to 0 when NA
+  ungroup()  # Remove groupin
+```
+
+Criando Size
+
+```{r}
+# Create Size and Size2 variables
+data_long$Size <- log(data_long$TotalAssets)
+data_long$Size2 <- data_long$Size^2
+```
+
+Calculando SA index
+
+```{r}
+library(naniar)
+
+data_long <- data_long %>%
+  replace_with_na(replace = list(Age = 0))
+data_long <- data_long %>%
+  replace_with_na(replace = list(`PropertyPlant&Equipment-Net-Total` = 0))
+data_long <- data_long %>%
+  replace_with_na(replace = list(`TotalLiabilities&Equity` = 0))
+```
+
+
+```{r}
+data_long$SA <- (-0.737 * data_long$Size) + (0.043 * data_long$Size2) - (0.040 * data_long$Age)
+```
+
+Arrumando para o KZ
+
+Tobin's Q = Item 6-60-74+(25*24) / 6
+6 - liabilities and stockholders equity
+60 - common equity
+74 - Differed taxes
+24 - Price Close
+25 - Common Shares Outstanding
+
+```{r}
+data_long$Q <- (data_long$`TotalLiabilities&Equity`- data_long$`CommonEquity-Total`- data_long$`IncomeTaxes-Deferred` + (data_long$PriceClose * data_long$`CommonShares-Outstanding-Total`)) / data_long$`TotalLiabilities&Equity`
+```
+
+Cash Flow/K
+(18+14)/8
+
+```{r}
+data_long$CashflowK <- (data_long$`IncomebeforeDiscontinuedOperations&ExtraordinaryItems` + data_long$`DepreciationDepletion&AmortizationTotal`) / data_long$`PropertyPlant&Equipment-Net-Total`
+```
+
+Debt/Total capital
+(9+34)/(9+34+216)
+
+34 = (data_long$TotalDebt - data_long$LongTermDebtTotal)
+
+```{r}
+data_long$DebtTotalCapital <- (data_long$LongTermDebtTotal + (data_long$TotalDebt - data_long$LongTermDebtTotal)) / (data_long$LongTermDebtTotal + (data_long$TotalDebt - data_long$LongTermDebtTotal) + data_long$StockholdersEquity)
+```
+
+Dividends/K
+(21+19)/8
+21+19 = Total dividends
+
+```{r}
+data_long$DividendK <- (data_long$`DividendsPaid-Cash-TotalCash Flow`) / data_long$`PropertyPlant&Equipment-Net-Total`
+```
+
+Cash/K
+1/8
+
+```{r}
+data_long$CashK <- data_long$`Cash&ShortTermInvestments`/data_long$`PropertyPlant&Equipment-Net-Total`
+```
+
+KZ
+
+Resolvendo o NA do KZ
+
+```{r}
+# Replace NA with 0 in specific columns if SA is non-NA
+data_long <- data_long %>%
+  mutate(
+    CashflowK = ifelse(!is.na(SA) & is.na(CashflowK), 0, CashflowK),
+    Q = ifelse(!is.na(SA) & is.na(Q), 0, Q),
+    DebtTotalCapital = ifelse(!is.na(SA) & is.na(DebtTotalCapital), 0, DebtTotalCapital),
+    DividendK = ifelse(!is.na(SA) & is.na(DividendK), 0, DividendK),
+    CashK = ifelse(!is.na(SA) & is.na(CashK), 0, CashK)
+  )
+```
+
+```{r}
+data_long$KZ <- (-1.001909 * data_long$CashflowK + + 0.2826389*data_long$Q + +3.139193 * data_long$DebtTotalCapital - 39.3678 * data_long$DividendK - 1.314759 * data_long$CashK)
+```
+
+Limpando Data_long
+
+```{r}
+data_long <- data_long %>%
+  select(-PriceClose_NotNA) %>%
+  filter(rowSums(!is.na(select(., -Identifier))) > 0)
+```
+
+Clearing the dataset of middle NA's in the rows
+Keeping only the years we want 1993-2022
+
+```{r}
+# Function to check for the pattern of having a non-NA followed by an NA and then a non-NA again
+exclude_firms_with_na_pattern <- function(price_close) {
+  # Find positions where PriceClose is not NA
+  non_na_positions <- which(!is.na(price_close))
+  # Loop through non-NA positions to find if an NA follows immediately after any of them
+  for (pos in non_na_positions) {
+    if (pos < length(price_close) && is.na(price_close[pos + 1]) && 
+        any(non_na_positions > (pos + 1))) {
+      return(TRUE)
+    }
+  }
+  return(FALSE)
+}
+
+# Apply the function to filter out the firms
+filtered_data <- data_long %>%
+  group_by(Identifier) %>%
+  filter(!exclude_firms_with_na_pattern(PriceClose)) %>%
+  ungroup()
+
+# Apply the function to filter out the firms
+filtered_data <- filtered_data %>%
+  group_by(Identifier) %>%
+  filter(!exclude_firms_with_na_pattern(Size)) %>%
+  ungroup()
+
+filtered_data <- filtered_data %>%
+  filter(year > 1992)
+```
+
+Dataset with only KZ and SA
+
+```{r}
+SAKZ <- filtered_data %>%
+  select(Identifier, year, SA, KZ)
+```
+
+Limpando o SAKZ
+
+```{r}
+SAKZ <- SAKZ %>%
+  filter(rowSums(!is.na(select(., -Identifier, -year))) > 0)
+```
+
+```{r}
+SAKZ <- SAKZ %>%
+  arrange(Identifier, year)
+```
+
+Correrlations 
+
+```{r}
+correlations_by_firm <- SAKZ %>%
+  group_by(Identifier) %>%
+  summarise(correlation = cor(SA, KZ, use = "complete.obs"))  # 'use' argument handles NAs
+
+correlations_by_year <- SAKZ %>%
+  group_by(year) %>%
+  summarise(correlation = cor(SA, KZ, use = "complete.obs"))
+
+total_correlation <- cor(SAKZ$SA,SAKZ$KZ)
+```
+
+Criando dataset para Regressão
+
+ asset growth = market-to-book ratio, payout ratio, and ROA
+ 
+```{r}
+regressao <- filtered_data %>%
+  select(Identifier,year,TotalAssets,PriceClose, `CommonShares-Outstanding-Total`, StockholdersEquity, `DividendsPaid-Cash-TotalCash Flow`, `NetIncome-Actual`, SA, KZ)
+```
+
+```{r}
+regressao <- regressao %>%
+  filter(rowSums(!is.na(select(., -Identifier, -year,-TotalAssets,-`CommonShares-Outstanding-Total`,-PriceClose,-StockholdersEquity,-`NetIncome-Actual`,-`DividendsPaid-Cash-TotalCash Flow`))) > 0)
+
+regressao <- regressao %>%
+  arrange(Identifier, year)
+
+regressao$TotalAssets <- as.numeric(as.character(regressao$TotalAssets))
+```
+
+Criando os valores
+
+Lagged Total Assets
+
+```{r}
+regressao <- regressao %>%
+  group_by(Identifier) %>%
+  mutate(LagTA = dplyr::lag(TotalAssets, 1))
+```
+
+Asset Grwoth
+
+```{r}
+regressao <- regressao %>%
+  group_by(Identifier) %>%
+  mutate(AssetGrowth = (TotalAssets - LagTA)/ LagTA)
+```
+
+Market to Book Ratio
+
+```{r}
+regressao <- regressao %>%
+  group_by(Identifier) %>%
+  mutate(MarkettoBookRatio = (PriceClose * `CommonShares-Outstanding-Total`)/ StockholdersEquity)
+```
+
+Payout Ratio
+
+```{r}
+#library(naniar)
+regressao <- regressao %>%
+  mutate(`DividendsPaid-Cash-TotalCash Flow` = replace(`DividendsPaid-Cash-TotalCash Flow`, is.na(`DividendsPaid-Cash-TotalCash Flow`), 0))
+```
+
+```{r}
+regressao <- regressao %>%
+  group_by(Identifier) %>%
+  mutate(PayoutRatio = `DividendsPaid-Cash-TotalCash Flow`/ `NetIncome-Actual`)
+```
+
+ROA
+
+```{r}
+regressao <- regressao %>%
+  group_by(Identifier) %>%
+  mutate(ROA = `NetIncome-Actual`/TotalAssets)
+```
+
+Dataset só para Regressão
+
+```{r}
+regressao_msm <- regressao %>%
+  select(Identifier, year, AssetGrowth, MarkettoBookRatio, PayoutRatio, ROA, KZ, SA)
+```
+
+Ajeitando Payout Ratio
+
+```{r}
+regressao_msm <- regressao_msm %>%
+  mutate(PayoutRatio = replace(PayoutRatio, is.na(PayoutRatio), 0))
+```
+
+Regressão
+
+```{r}
+results_KZ <- plm(KZ ~ AssetGrowth + MarkettoBookRatio + PayoutRatio + ROA,
+               data = regressao_msm, 
+               index = c("Identifier", "year"),
+               model = "within",
+               effect = "twoways")
+
+summary(results_KZ)
+```
+
+SA - index
+
+```{r}
+results_SA <- plm(SA ~ AssetGrowth + MarkettoBookRatio + PayoutRatio + ROA,
+               data = regressao_msm, 
+               index = c("Identifier", "year"),
+               model = "within",
+               effect = "twoways")
+
+summary(results_SA)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
